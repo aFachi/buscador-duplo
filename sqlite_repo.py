@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS produtos_cache (
     descricao TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_produtos_cache_desc ON produtos_cache(descricao);
+CREATE INDEX IF NOT EXISTS idx_produtos_cache_codigo ON produtos_cache(codigo);
 
 CREATE TABLE IF NOT EXISTS veiculos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -18,6 +19,9 @@ CREATE TABLE IF NOT EXISTS veiculos (
     motor TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_veic_compacto ON veiculos(marca, modelo, ano_inicio, ano_fim, motor);
+CREATE INDEX IF NOT EXISTS idx_veic_marca ON veiculos(marca);
+CREATE INDEX IF NOT EXISTS idx_veic_modelo ON veiculos(modelo);
+CREATE INDEX IF NOT EXISTS idx_veic_motor ON veiculos(motor);
 
 CREATE TABLE IF NOT EXISTS aplicacoes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -69,14 +73,14 @@ class SqliteRepo:
                 [(i["codigo"], i["descricao"]) for i in items],
             )
 
-    def search_products_cache(self, q: str) -> List[Dict[str, Any]]:
+    def search_products_cache(self, q: str, limit: int = 200) -> List[Dict[str, Any]]:
         if not q.strip():
             return []
         pattern = f"%{q.strip()}%"
         with self._conn() as con:
             cur = con.execute(
-                "SELECT codigo, descricao FROM produtos_cache WHERE descricao LIKE ? OR codigo LIKE ? LIMIT 200",
-                (pattern, pattern),
+                "SELECT codigo, descricao FROM produtos_cache WHERE descricao LIKE ? OR codigo LIKE ? LIMIT ?",
+                (pattern, pattern, int(limit)),
             )
             return [dict(row) for row in cur.fetchall()]
 
@@ -137,6 +141,26 @@ class SqliteRepo:
             cur = con.execute(
                 "SELECT * FROM veiculos ORDER BY marca, modelo, ano_inicio"
             )
+            return [dict(row) for row in cur.fetchall()]
+
+    def suggest_vehicles(self, veiculo_q: str) -> List[Dict[str, Any]]:
+        terms = [t.strip() for t in veiculo_q.split() if t.strip()]
+        if not terms:
+            return []
+        with self._conn() as con:
+            base_sql = """
+                SELECT DISTINCT marca, modelo, IFNULL(ano_inicio,0) as ano_inicio,
+                       IFNULL(ano_fim,0) as ano_fim, IFNULL(motor,'') as motor
+                FROM veiculos
+                WHERE 1=1
+            """
+            params: List[str] = []
+            for t in terms:
+                base_sql += " AND (marca LIKE ? OR modelo LIKE ? OR CAST(IFNULL(ano_inicio,0) AS TEXT) LIKE ? OR CAST(IFNULL(ano_fim,0) AS TEXT) LIKE ? OR IFNULL(motor,'') LIKE ?)"
+                like = f"%{t}%"
+                params.extend([like, like, like, like, like])
+            base_sql += " ORDER BY marca, modelo LIMIT 50"
+            cur = con.execute(base_sql, params)
             return [dict(row) for row in cur.fetchall()]
 
     def search_applications(self, veiculo_q: str) -> List[Dict[str, Any]]:
