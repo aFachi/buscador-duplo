@@ -282,6 +282,45 @@ class FirebirdClient:
             }
         return out
 
+    def fetch_stock_price_by_codes(
+        self, codes: List[str]
+    ) -> Dict[str, Dict[str, Optional[float]]]:
+        """Busca estoque e preço para uma lista de códigos."""
+        if not codes:
+            return {}
+        sig = self._discover_product_table()
+        if not sig:
+            return {}
+        table, mapping = sig
+        cols = self._table_columns(table)
+        estoque_col = self._find_first_existing(cols, self._candidate_stock_cols)
+        preco_col = mapping.get("preco")
+        codigo_col = mapping["codigo"]
+        select_parts = [f"{codigo_col} AS CODIGO"]
+        if estoque_col:
+            select_parts.append(f"{estoque_col} AS ESTOQUE")
+        else:
+            select_parts.append("CAST(NULL AS DECIMAL(18,4)) AS ESTOQUE")
+        if preco_col:
+            select_parts.append(f"{preco_col} AS PRECO")
+        else:
+            select_parts.append("CAST(NULL AS DECIMAL(18,4)) AS PRECO")
+        select_cols = ", ".join(select_parts)
+        placeholders = ",".join(["?"] * len(codes))
+        sql = f"SELECT {select_cols} FROM {table} WHERE {codigo_col} IN ({placeholders})"
+        with self._connect() as con:
+            cur = con.cursor()
+            cur.execute(sql, codes)
+            rows = cur.fetchall()
+        out: Dict[str, Dict[str, Optional[float]]] = {}
+        for r in rows:
+            codigo, estoque, preco = r
+            out[_norm(codigo) or ""] = {
+                "estoque": float(estoque) if estoque is not None else None,
+                "preco": float(preco) if preco is not None else None,
+            }
+        return out
+
     def search_products_loose(
         self,
         produto: str = "",

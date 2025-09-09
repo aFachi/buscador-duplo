@@ -65,8 +65,11 @@ Um teste opcional cria um banco Firebird temporário para validar o fluxo de
 sincronização e busca. É necessário ter um servidor Firebird local em
 `localhost:3050`; caso contrário o teste será ignorado.
 
-```bash
+```
+codex/implement-auto-complete-search-for-products-0tioi7
 pytest tests/test_firebird_integration.py
+pytest test_firebird_integration.py
+
 ```
 
 ## Variáveis de ambiente

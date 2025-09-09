@@ -123,7 +123,6 @@ async def suggest_veiculo(q: str = ""):
     items = repo.suggest_vehicles(q)
     return JSONResponse(items)
 
-
 @app.get("/health")
 async def health():
     """Retorna estado do Firebird e timestamp da última sincronização."""
