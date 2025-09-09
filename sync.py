@@ -1,10 +1,14 @@
 import configparser
-from sqlite_repo import SqliteRepo
-from firebird_client import FirebirdClient
 from datetime import datetime
 
+from firebird_client import FirebirdClient
+from sqlite_repo import SqliteRepo
+
+
 class SyncService:
-    def __init__(self, config: configparser.ConfigParser, fb: FirebirdClient, repo: SqliteRepo):
+    def __init__(
+        self, config: configparser.ConfigParser, fb: FirebirdClient, repo: SqliteRepo
+    ):
         self.config = config
         self.fb = fb
         self.repo = repo
@@ -13,10 +17,12 @@ class SyncService:
     def auto_sync(self):
         try:
             if self.autosync_minutes == 0:
-                self.sync_products_cache(); return
+                self.sync_products_cache()
+                return
             last = self.repo.get_meta("last_sync")
             if not last:
-                self.sync_products_cache(); return
+                self.sync_products_cache()
+                return
             last_dt = datetime.fromisoformat(last)
             if (datetime.now() - last_dt).total_seconds() >= self.autosync_minutes * 60:
                 self.sync_products_cache()

@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+
+# Ambiente virtual e variáveis locais
+.venv/
+.env
+
+# Bancos locais e artefatos
+*.db
+catalogo.db
+dist/
+build/
+*.spec
+
+# VS Code
+.vscode/
+
+# SO
+.DS_Store
+Thumbs.db

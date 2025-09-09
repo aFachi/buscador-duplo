@@ -1,5 +1,8 @@
-from typing import List, Dict, Any
-import pyfirebirdsql, configparser
+import configparser
+from typing import Any, Dict, List
+
+import pyfirebirdsql
+
 
 class FirebirdClient:
     def __init__(self, config: configparser.ConfigParser):
@@ -15,8 +18,12 @@ class FirebirdClient:
 
     def _connect(self):
         return pyfirebirdsql.connect(
-            host=self.host, port=self.port, database=self.database_path,
-            user=self.user, password=self.password, charset=self.charset
+            host=self.host,
+            port=self.port,
+            database=self.database_path,
+            user=self.user,
+            password=self.password,
+            charset=self.charset,
         )
 
     def fetch_products_basic(self) -> List[Dict[str, Any]]:
@@ -34,7 +41,8 @@ class FirebirdClient:
             return out
 
     def fetch_stock_price_by_codes(self, codes: List[str]) -> Dict[str, Dict[str, Any]]:
-        if not codes: return {}
+        if not codes:
+            return {}
         placeholders = ",".join(["?"] * len(codes))
         sql = self.sql_stock_price.replace("{codes_in}", placeholders)
         with self._connect() as con:
@@ -48,5 +56,8 @@ class FirebirdClient:
                 codigo = str(rec["codigo"]).strip()
                 estoque = rec.get("estoque", 0)
                 preco = rec.get("preco", None)
-                result[codigo] = {"estoque": estoque, "preco": float(preco) if preco is not None else None}
+                result[codigo] = {
+                    "estoque": estoque,
+                    "preco": float(preco) if preco is not None else None,
+                }
             return result

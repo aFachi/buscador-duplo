@@ -1,5 +1,5 @@
 import sqlite3
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 """
 
+
 class SqliteRepo:
     def __init__(self, db_path: str):
         self.db_path = db_path
@@ -55,60 +56,87 @@ class SqliteRepo:
 
     def set_meta(self, k: str, v: str):
         with self._conn() as con:
-            con.execute("INSERT INTO meta(k, v) VALUES(?, ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", (k, v))
+            con.execute(
+                "INSERT INTO meta(k, v) VALUES(?, ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                (k, v),
+            )
 
     def upsert_products(self, items: List[Dict[str, Any]]):
         with self._conn() as con:
             con.executemany(
                 "INSERT INTO produtos_cache(codigo, descricao) VALUES(?, ?) "
                 "ON CONFLICT(codigo) DO UPDATE SET descricao=excluded.descricao",
-                [(i["codigo"], i["descricao"]) for i in items]
+                [(i["codigo"], i["descricao"]) for i in items],
             )
 
     def search_products_cache(self, q: str) -> List[Dict[str, Any]]:
-        if not q.strip(): return []
+        if not q.strip():
+            return []
         pattern = f"%{q.strip()}%"
         with self._conn() as con:
             cur = con.execute(
                 "SELECT codigo, descricao FROM produtos_cache WHERE descricao LIKE ? OR codigo LIKE ? LIMIT 200",
-                (pattern, pattern)
+                (pattern, pattern),
             )
             return [dict(row) for row in cur.fetchall()]
 
     def get_products_by_codes(self, codes: List[str]) -> List[Dict[str, Any]]:
-        if not codes: return []
+        if not codes:
+            return []
         placeholders = ",".join(["?"] * len(codes))
         with self._conn() as con:
-            cur = con.execute(f"SELECT codigo, descricao FROM produtos_cache WHERE codigo IN ({placeholders})", codes)
+            cur = con.execute(
+                f"SELECT codigo, descricao FROM produtos_cache WHERE codigo IN ({placeholders})",
+                codes,
+            )
             return [dict(row) for row in cur.fetchall()]
 
-    def upsert_vehicle(self, marca: str, modelo: str, ano_inicio: int, ano_fim: int, motor: str = ""):
+    def upsert_vehicle(
+        self, marca: str, modelo: str, ano_inicio: int, ano_fim: int, motor: str = ""
+    ):
         with self._conn() as con:
-            cur = con.execute("""
+            cur = con.execute(
+                """
                 SELECT id FROM veiculos WHERE marca=? AND modelo=? AND IFNULL(ano_inicio,0)=? AND IFNULL(ano_fim,0)=? AND IFNULL(motor,'')=?
-            """, (marca, modelo, int(ano_inicio or 0), int(ano_fim or 0), motor or ""))
+            """,
+                (marca, modelo, int(ano_inicio or 0), int(ano_fim or 0), motor or ""),
+            )
             row = cur.fetchone()
-            if row: return row["id"]
-            cur = con.execute("""
+            if row:
+                return row["id"]
+            cur = con.execute(
+                """
                 INSERT INTO veiculos(marca, modelo, ano_inicio, ano_fim, motor) VALUES(?,?,?,?,?)
-            """, (marca, modelo, int(ano_inicio or 0), int(ano_fim or 0), motor or ""))
+            """,
+                (marca, modelo, int(ano_inicio or 0), int(ano_fim or 0), motor or ""),
+            )
             return cur.lastrowid
 
-    def find_vehicle(self, marca: str, modelo: str, ano_inicio: int, ano_fim: int, motor: str = "") -> Optional[Dict[str, Any]]:
+    def find_vehicle(
+        self, marca: str, modelo: str, ano_inicio: int, ano_fim: int, motor: str = ""
+    ) -> Optional[Dict[str, Any]]:
         with self._conn() as con:
-            cur = con.execute("""
+            cur = con.execute(
+                """
                 SELECT * FROM veiculos WHERE marca=? AND modelo=? AND IFNULL(ano_inicio,0)=? AND IFNULL(ano_fim,0)=? AND IFNULL(motor,'')=?
-            """, (marca, modelo, int(ano_inicio or 0), int(ano_fim or 0), motor or ""))
+            """,
+                (marca, modelo, int(ano_inicio or 0), int(ano_fim or 0), motor or ""),
+            )
             row = cur.fetchone()
             return dict(row) if row else None
 
     def add_application(self, codigo_produto: str, veiculo_id: int):
         with self._conn() as con:
-            con.execute("INSERT INTO aplicacoes(codigo_produto, veiculo_id) VALUES(?,?)", (codigo_produto, veiculo_id))
+            con.execute(
+                "INSERT INTO aplicacoes(codigo_produto, veiculo_id) VALUES(?,?)",
+                (codigo_produto, veiculo_id),
+            )
 
     def list_vehicles(self) -> List[Dict[str, Any]]:
         with self._conn() as con:
-            cur = con.execute("SELECT * FROM veiculos ORDER BY marca, modelo, ano_inicio")
+            cur = con.execute(
+                "SELECT * FROM veiculos ORDER BY marca, modelo, ano_inicio"
+            )
             return [dict(row) for row in cur.fetchall()]
 
     def search_applications(self, veiculo_q: str) -> List[Dict[str, Any]]:
