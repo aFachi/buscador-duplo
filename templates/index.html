@@ -1,0 +1,27 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>BC Auto Peças — Buscador</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="container">
+    <h1>Buscador Duplo — BC Auto Peças</h1>
+    <p>Digite ao menos dois campos para refinar os resultados.</p>
+    <form action="/search" method="post" class="card">
+      <label>Produto (ex.: pastilha)</label>
+      <input type="text" name="produto" placeholder="nome ou código" />
+      <label>Veículo (ex.: Voyage 2012 1.6)</label>
+      <input type="text" name="veiculo" placeholder="marca modelo ano motor" />
+      <label>Detalhe (opcional)</label>
+      <input type="text" name="detalhe" placeholder="ex.: 8v, ABS, dianteira" />
+      <button type="submit">Buscar</button>
+    </form>
+
+    <div class="links">
+      <a href="/admin/aplicacoes">Admin &rsaquo; Aplicações</a>
+    </div>
+  </div>
+</body>
+</html>
