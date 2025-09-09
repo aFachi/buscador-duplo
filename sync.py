@@ -1,3 +1,4 @@
+import asyncio
 import configparser
 from datetime import datetime
 
@@ -13,23 +14,33 @@ class SyncService:
         self.fb = fb
         self.repo = repo
         self.autosync_minutes = int(config["app"].get("autosync_minutes", 0))
+        self._task: asyncio.Task | None = None
 
-    def auto_sync(self):
+    async def auto_sync(self):
+        """Verifica necessidade de sincronização e dispara em background."""
         try:
             if self.autosync_minutes == 0:
-                self.sync_products_cache()
+                await self._ensure_task()
                 return
             last = self.repo.get_meta("last_sync")
             if not last:
-                self.sync_products_cache()
+                await self._ensure_task()
                 return
             last_dt = datetime.fromisoformat(last)
             if (datetime.now() - last_dt).total_seconds() >= self.autosync_minutes * 60:
-                self.sync_products_cache()
+                await self._ensure_task()
         except Exception as e:
             print(f"[WARN] Falha no autosync: {e}")
+
+    async def _ensure_task(self):
+        if self._task and not self._task.done():
+            return
+        self._task = asyncio.create_task(self.sync_products_cache_async())
 
     def sync_products_cache(self):
         items = self.fb.fetch_products_basic()
         self.repo.upsert_products(items)
         self.repo.set_meta("last_sync", datetime.now().isoformat())
+
+    async def sync_products_cache_async(self):
+        await asyncio.to_thread(self.sync_products_cache)
