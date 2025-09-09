@@ -4,6 +4,7 @@ import threading
 import time
 import webbrowser
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -13,6 +14,9 @@ from firebird_client import FirebirdClient
 from search_service import SearchService
 from sqlite_repo import SqliteRepo
 from sync import SyncService
+
+load_dotenv()  # carrega .env para os.environ
+
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
