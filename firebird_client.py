@@ -1,75 +1,275 @@
 # firebird_client.py
-import configparser
 import os
-from typing import Any, Dict, List
+import re
+import contextlib
+from typing import Dict, List, Optional, Tuple
 
-import firebirdsql  # driver puro Python, compatível com FB 2.5
+import firebirdsql  # driver puro Python compatível com FB 2.5
+
+# --------- Helpers de log ----------
+def _log(*args):
+    print("[FB]", *args)
+
+def _norm(s: Optional[str]) -> Optional[str]:
+    return s.strip() if isinstance(s, str) else s
 
 
 class FirebirdClient:
-    def __init__(self, config: configparser.ConfigParser):
-        fb = config["firebird"]
-        # Permite sobrescrever via .env se você já carrega dotenv no app.py
-        self.host = os.getenv("FIREBIRD_HOST", fb.get("host", "127.0.0.1"))
-        self.port = int(os.getenv("FIREBIRD_PORT", fb.getint("port", 3050)))
-        # No Firebird 2.5, ao conectar remotamente, "database" deve ser o CAMINHO COMPLETO no servidor.
-        self.database_path = os.getenv("FIREBIRD_DB_PATH", fb.get("database_path"))
-        self.user = os.getenv("FIREBIRD_USER", fb.get("user"))
-        self.password = os.getenv("FIREBIRD_PASSWORD", fb.get("password"))
-        self.charset = os.getenv("FIREBIRD_CHARSET", fb.get("charset", "WIN1252"))
+    """
+    Cliente Firebird com descoberta dinâmica de tabela/colunas de produto.
+    Padroniza o output em chaves: codigo, descricao, barras, preco.
+    """
 
-        self.sql_list_products = config["sgbr_sql"]["list_products"]
-        self.sql_stock_price = config["sgbr_sql"]["stock_price_by_codes"]
+    # nomes "prováveis" para tabela de produtos
+    _likely_product_tables = [
+        "TPRODUTO", "TPRODUTOS", "PRODUTO", "PRODUTOS",
+        "ESTOQUE", "TESTOQUE", "T_ESTOQUE",
+        "ITENS", "TITENS", "ITEM", "TITEM",
+    ]
 
+    # mapeamento de aliases possíveis -> chave padronizada
+    _candidate_cols = {
+        "codigo": ["CODPRODUTO", "CODIGO", "COD", "IDPRODUTO", "ID", "C_PRODUTO"],
+        "descricao": ["DESCRICAO", "DESCRICAOAPLICACAO", "PRODUTO", "NOME", "DESCR", "DESCRI"],
+        "barras": ["BARRAS", "CODBARRAS", "CODIGOBARRAS", "EAN", "GTIN"],
+        "preco": ["PRECO", "PRECOVENDA", "VALOR", "PRECO1", "VLRVENDA"],
+    }
+
+    def __init__(self, cfg):
+        # 1) tenta pegar do config.ini (se houver)
+        host = cfg.get("FIREBIRD", "HOST", fallback=None)
+        port = cfg.getint("FIREBIRD", "PORT", fallback=None)
+        user = cfg.get("FIREBIRD", "USER", fallback=None)
+        password = cfg.get("FIREBIRD", "PASSWORD", fallback=None)
+        database = cfg.get("FIREBIRD", "DATABASE", fallback=None)
+        charset = cfg.get("FIREBIRD", "CHARSET", fallback=None)
+
+        # 2) senão, cai pro .env
+        self.host = host or os.environ.get("FIREBIRD_HOST", "localhost")
+        self.port = port or int(os.environ.get("FIREBIRD_PORT", "3050"))
+        self.user = user or os.environ.get("FIREBIRD_USER", "sysdba")
+        self.password = password or os.environ.get("FIREBIRD_PASSWORD", "masterkey")
+        self.database = database or os.environ.get("FIREBIRD_DATABASE")
+        self.charset = (charset or os.environ.get("FIREBIRD_CHARSET") or "WIN1252").upper()
+
+        if not self.database:
+            raise RuntimeError("Caminho do banco Firebird não encontrado (FIREBIRD.DATABASE no config.ini ou FIREBIRD_DATABASE no .env).")
+
+        # cache de metadados
+        self._columns_cache: Dict[str, List[str]] = {}
+        self._product_table_signature: Optional[Tuple[str, Dict[str, str]]] = None
+
+    # ---------- Conexão ----------
     def _connect(self):
+        # Nada de auth_method e nada de timeout que quebraram antes
         return firebirdsql.connect(
             host=self.host,
             port=self.port,
-            database=self.database_path,  # ex.: C:/SGBR/BASESGMASTER.FDB
             user=self.user,
             password=self.password,
+            database=self.database,
             charset=self.charset,
-            timeout=10,
         )
 
-    def fetch_products_basic(self) -> List[Dict[str, Any]]:
-        """Retorna lista de produtos do SGBR com campos: codigo, descricao"""
+    # ---------- Metadata ----------
+    def _list_tables(self) -> List[str]:
         with self._connect() as con:
             cur = con.cursor()
-            cur.execute(self.sql_list_products)
-            rows = cur.fetchall()
-            cols = [d[0].lower() for d in cur.description]
-            out: List[Dict[str, Any]] = []
-            for r in rows:
-                rec = dict(zip(cols, r))
-                rec["codigo"] = str(rec["codigo"]).strip()
-                rec["descricao"] = str(rec["descricao"]).strip()
-                out.append(rec)
-            return out
+            cur.execute("""
+                SELECT TRIM(RDB$RELATION_NAME)
+                FROM RDB$RELATIONS
+                WHERE RDB$VIEW_BLR IS NULL
+                  AND (RDB$SYSTEM_FLAG IS NULL OR RDB$SYSTEM_FLAG = 0)
+            """)
+            return [r[0] for r in cur.fetchall()]
 
-    def fetch_stock_price_by_codes(self, codes: List[str]) -> Dict[str, Dict[str, Any]]:
-        """Retorna dict: codigo -> {estoque, preco}"""
-        if not codes:
-            return {}
-        placeholders = ",".join(["?"] * len(codes))  # firebirdsql usa paramstyle 'qmark'
-        sql = self.sql_stock_price.replace("{codes_in}", placeholders)
+    def _table_columns(self, table: str) -> List[str]:
+        t = table.upper()
+        if t in self._columns_cache:
+            return self._columns_cache[t]
         with self._connect() as con:
             cur = con.cursor()
-            cur.execute(sql, [str(c) for c in codes])
+            cur.execute("""
+                SELECT TRIM(rf.RDB$FIELD_NAME)
+                FROM RDB$RELATION_FIELDS rf
+                JOIN RDB$FIELDS f ON f.RDB$FIELD_NAME = rf.RDB$FIELD_SOURCE
+                WHERE rf.RDB$RELATION_NAME = ?
+                ORDER BY rf.RDB$FIELD_POSITION
+            """, (t,))
+            cols = [r[0] for r in cur.fetchall()]
+            self._columns_cache[t] = cols
+            return cols
+
+    def _find_first_existing(self, cols: List[str], candidates: List[str]) -> Optional[str]:
+        setcols = {c.upper(): c for c in cols}
+        for cand in candidates:
+            if cand.upper() in setcols:
+                return setcols[cand.upper()]
+        return None
+
+    def _looks_like_product_table(self, table: str, cols: List[str]) -> bool:
+        up = table.upper()
+        # heurística: nome forte + existência de ao menos 1 campo "descricao"
+        if any(up == c for c in self._likely_product_tables):
+            return True
+        # nomes que "sugiram" produto/estoque
+        if re.search(r"(PROD|ESTOQ|ITEM)", up):
+            # precisa ter pelo menos uma coluna que pareça descrição
+            if self._find_first_existing(cols, self._candidate_cols["descricao"]):
+                return True
+        return False
+
+    def _discover_product_table(self) -> Optional[Tuple[str, Dict[str, str]]]:
+        """
+        Retorna (nome_tabela, mapping_colunas), onde mapping_colunas mapeia
+        'codigo'|'descricao'|'barras'|'preco' -> nome real da coluna.
+        """
+        if self._product_table_signature is not None:
+            return self._product_table_signature
+
+        tables = self._list_tables()
+        # tente as "fortes" primeiro
+        ordered = sorted(
+            tables,
+            key=lambda t: (0 if t.upper() in self._likely_product_tables else 1, t)
+        )
+        for t in ordered:
+            cols = self._table_columns(t)
+            if not self._looks_like_product_table(t, cols):
+                continue
+            m: Dict[str, str] = {}
+            for key in ["codigo", "descricao", "barras", "preco"]:
+                hit = self._find_first_existing(cols, self._candidate_cols[key])
+                if hit:
+                    m[key] = hit
+            # precisa ter ao menos 'codigo' e 'descricao'
+            if "codigo" in m and "descricao" in m:
+                self._product_table_signature = (t, m)
+                _log(f"Tabela de produto descoberta: {t} -> {m}")
+                return self._product_table_signature
+
+        _log("Não foi possível descobrir automaticamente a tabela de produtos.")
+        self._product_table_signature = None
+        return None
+
+    # ---------- API pública ----------
+    def ping(self) -> bool:
+        try:
+            with self._connect() as con:
+                cur = con.cursor()
+                cur.execute("SELECT 1 FROM RDB$DATABASE")
+                cur.fetchone()
+            return True
+        except Exception as e:
+            _log("ping falhou:", e)
+            return False
+
+    def fetch_products_basic(self, limit: int = 200) -> List[Dict]:
+        """
+        Usado pelo SyncService: obtém um snapshot básico de produtos.
+        Retorna lista de dicts com: codigo, descricao, barras, preco
+        """
+        sig = self._discover_product_table()
+        if not sig:
+            return []  # deixa o autosync passar em branco sem quebrar
+        table, mapping = sig
+        parts = []
+        parts.append(f"{mapping['codigo']} AS CODIGO")
+        parts.append(f"{mapping['descricao']} AS DESCRICAO")
+        if "barras" in mapping:
+            parts.append(f"{mapping['barras']} AS BARRAS")
+        else:
+            parts.append("CAST(NULL AS VARCHAR(40)) AS BARRAS")
+        if "preco" in mapping:
+            parts.append(f"{mapping['preco']} AS PRECO")
+        else:
+            parts.append("CAST(NULL AS DECIMAL(18,4)) AS PRECO")
+
+        select_cols = ", ".join(parts)
+        sql = f"SELECT FIRST {int(limit)} {select_cols} FROM {table}"
+
+        with self._connect() as con:
+            cur = con.cursor()
+            cur.execute(sql)
             rows = cur.fetchall()
-            cols = [d[0].lower() for d in cur.description]
-            result: Dict[str, Dict[str, Any]] = {}
-            for r in rows:
-                rec = dict(zip(cols, r))
-                codigo = str(rec["codigo"]).strip()
-                estoque = rec.get("estoque", 0)
-                preco = rec.get("preco", None)
-                result[codigo] = {
-                    "estoque": estoque,
-                    "preco": float(preco) if preco is not None else None,
-                }
-            return result
-                }
-            return result
-                }
-            return result
+
+        out: List[Dict] = []
+        for r in rows:
+            codigo, descricao, barras, preco = r
+            out.append({
+                "codigo": _norm(codigo),
+                "descricao": _norm(descricao),
+                "barras": _norm(barras),
+                "preco": float(preco) if preco is not None else None,
+            })
+        return out
+
+    def search_products_loose(
+        self,
+        produto: str = "",
+        veiculo: str = "",
+        detalhe: str = "",
+        limit: int = 50,
+    ) -> List[Dict]:
+        """
+        Pesquisa "solta" no Firebird com base nas colunas que existirem.
+        O SearchService usa o SQLite; isto aqui serve de fallback se você quiser.
+        """
+        sig = self._discover_product_table()
+        if not sig:
+            return []
+        table, mapping = sig
+
+        terms = [t for t in [produto, veiculo, detalhe] if t]
+        if not terms:
+            return []
+
+        where_clauses = []
+        params: List[str] = []
+        # consulta somente em texto (descricao) + opcionalmente código/barras se parecerem searchables
+        if "descricao" in mapping:
+            for t in terms:
+                where_clauses.append(f"{mapping['descricao']} LIKE ?")
+                params.append(f"%{t}%")
+
+        if "codigo" in mapping:
+            for t in terms:
+                where_clauses.append(f"CAST({mapping['codigo']} AS VARCHAR(50)) LIKE ?")
+                params.append(f"%{t}%")
+
+        if "barras" in mapping:
+            for t in terms:
+                where_clauses.append(f"{mapping['barras']} LIKE ?")
+                params.append(f"%{t}%")
+
+        if not where_clauses:
+            return []
+
+        parts = []
+        parts.append(f"{mapping['codigo']} AS CODIGO")
+        parts.append(f"{mapping['descricao']} AS DESCRICAO")
+        parts.append(f"{mapping.get('barras', 'CAST(NULL AS VARCHAR(40))')} AS BARRAS")
+        parts.append(f"{mapping.get('preco', 'CAST(NULL AS DECIMAL(18,4))')} AS PRECO")
+
+        select_cols = ", ".join(parts)
+        sql = f"""
+            SELECT FIRST {int(limit)} {select_cols}
+            FROM {table}
+            WHERE {" OR ".join(where_clauses)}
+        """
+
+        with self._connect() as con:
+            cur = con.cursor()
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+
+        out: List[Dict]] = []
+        for r in rows:
+            codigo, descricao, barras, preco = r
+            out.append({
+                "codigo": _norm(codigo),
+                "descricao": _norm(descricao),
+                "barras": _norm(barras),
+                "preco": float(preco) if preco is not None else None,
+            })
+        return out
