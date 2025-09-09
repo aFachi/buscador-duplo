@@ -31,6 +31,24 @@ uvicorn app:app --reload
 ```
 A aplicação abre automaticamente o navegador em `http://127.0.0.1:8000`.
 
+### Modo desktop
+
+Para uso direto na máquina do cliente, há uma interface simples em Tkinter:
+
+```bash
+python desktop.py
+```
+
+Para gerar um executável (Windows), instale o [PyInstaller](https://pyinstaller.org/)
+e execute:
+
+```bash
+pyinstaller --add-data "templates:templates" --add-data "static:static" --noconsole desktop.py
+```
+O executável ficará disponível em `dist/desktop/`.
+
+=======
+ main
 ### Health-check
 
 Há um endpoint de verificação rápida em `GET /health` que retorna o estado da
