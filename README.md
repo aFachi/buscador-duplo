@@ -47,8 +47,6 @@ pyinstaller --add-data "templates:templates" --add-data "static:static" --nocons
 ```
 O executável ficará disponível em `dist/desktop/`.
 
-=======
- main
 ### Health-check
 
 Há um endpoint de verificação rápida em `GET /health` que retorna o estado da
