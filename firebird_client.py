@@ -1,14 +1,16 @@
 # firebird_client.py
+import contextlib
 import os
 import re
-import contextlib
 from typing import Dict, List, Optional, Tuple
 
 import firebirdsql  # driver puro Python compatível com FB 2.5
 
+
 # --------- Helpers de log ----------
 def _log(*args):
     print("[FB]", *args)
+
 
 def _norm(s: Optional[str]) -> Optional[str]:
     return s.strip() if isinstance(s, str) else s
@@ -22,18 +24,40 @@ class FirebirdClient:
 
     # nomes "prováveis" para tabela de produtos
     _likely_product_tables = [
-        "TPRODUTO", "TPRODUTOS", "PRODUTO", "PRODUTOS",
-        "ESTOQUE", "TESTOQUE", "T_ESTOQUE",
-        "ITENS", "TITENS", "ITEM", "TITEM",
+        "TPRODUTO",
+        "TPRODUTOS",
+        "PRODUTO",
+        "PRODUTOS",
+        "ESTOQUE",
+        "TESTOQUE",
+        "T_ESTOQUE",
+        "ITENS",
+        "TITENS",
+        "ITEM",
+        "TITEM",
     ]
 
     # mapeamento de aliases possíveis -> chave padronizada
     _candidate_cols = {
         "codigo": ["CODPRODUTO", "CODIGO", "COD", "IDPRODUTO", "ID", "C_PRODUTO"],
-        "descricao": ["DESCRICAO", "DESCRICAOAPLICACAO", "PRODUTO", "NOME", "DESCR", "DESCRI"],
+        "descricao": [
+            "DESCRICAO",
+            "DESCRICAOAPLICACAO",
+            "PRODUTO",
+            "NOME",
+            "DESCR",
+            "DESCRI",
+        ],
         "barras": ["BARRAS", "CODBARRAS", "CODIGOBARRAS", "EAN", "GTIN"],
         "preco": ["PRECO", "PRECOVENDA", "VALOR", "PRECO1", "VLRVENDA"],
     }
+    _candidate_stock_cols = [
+        "ESTOQUE",
+        "SALDO",
+        "QTDESTOQUE",
+        "QTD",
+        "QUANTIDADE",
+    ]
 
     def __init__(self, cfg):
         # 1) tenta pegar do config.ini (se houver)
@@ -50,10 +74,14 @@ class FirebirdClient:
         self.user = user or os.environ.get("FIREBIRD_USER", "sysdba")
         self.password = password or os.environ.get("FIREBIRD_PASSWORD", "masterkey")
         self.database = database or os.environ.get("FIREBIRD_DATABASE")
-        self.charset = (charset or os.environ.get("FIREBIRD_CHARSET") or "WIN1252").upper()
+        self.charset = (
+            charset or os.environ.get("FIREBIRD_CHARSET") or "WIN1252"
+        ).upper()
 
         if not self.database:
-            raise RuntimeError("Caminho do banco Firebird não encontrado (FIREBIRD.DATABASE no config.ini ou FIREBIRD_DATABASE no .env).")
+            raise RuntimeError(
+                "Caminho do banco Firebird não encontrado (FIREBIRD.DATABASE no config.ini ou FIREBIRD_DATABASE no .env)."
+            )
 
         # cache de metadados
         self._columns_cache: Dict[str, List[str]] = {}
@@ -75,12 +103,14 @@ class FirebirdClient:
     def _list_tables(self) -> List[str]:
         with self._connect() as con:
             cur = con.cursor()
-            cur.execute("""
+            cur.execute(
+                """
                 SELECT TRIM(RDB$RELATION_NAME)
                 FROM RDB$RELATIONS
                 WHERE RDB$VIEW_BLR IS NULL
                   AND (RDB$SYSTEM_FLAG IS NULL OR RDB$SYSTEM_FLAG = 0)
-            """)
+            """
+            )
             return [r[0] for r in cur.fetchall()]
 
     def _table_columns(self, table: str) -> List[str]:
@@ -89,18 +119,23 @@ class FirebirdClient:
             return self._columns_cache[t]
         with self._connect() as con:
             cur = con.cursor()
-            cur.execute("""
+            cur.execute(
+                """
                 SELECT TRIM(rf.RDB$FIELD_NAME)
                 FROM RDB$RELATION_FIELDS rf
                 JOIN RDB$FIELDS f ON f.RDB$FIELD_NAME = rf.RDB$FIELD_SOURCE
                 WHERE rf.RDB$RELATION_NAME = ?
                 ORDER BY rf.RDB$FIELD_POSITION
-            """, (t,))
+            """,
+                (t,),
+            )
             cols = [r[0] for r in cur.fetchall()]
             self._columns_cache[t] = cols
             return cols
 
-    def _find_first_existing(self, cols: List[str], candidates: List[str]) -> Optional[str]:
+    def _find_first_existing(
+        self, cols: List[str], candidates: List[str]
+    ) -> Optional[str]:
         setcols = {c.upper(): c for c in cols}
         for cand in candidates:
             if cand.upper() in setcols:
@@ -131,7 +166,7 @@ class FirebirdClient:
         # tente as "fortes" primeiro
         ordered = sorted(
             tables,
-            key=lambda t: (0 if t.upper() in self._likely_product_tables else 1, t)
+            key=lambda t: (0 if t.upper() in self._likely_product_tables else 1, t),
         )
         for t in ordered:
             cols = self._table_columns(t)
@@ -196,12 +231,55 @@ class FirebirdClient:
         out: List[Dict] = []
         for r in rows:
             codigo, descricao, barras, preco = r
-            out.append({
-                "codigo": _norm(codigo),
-                "descricao": _norm(descricao),
-                "barras": _norm(barras),
+            out.append(
+                {
+                    "codigo": _norm(codigo),
+                    "descricao": _norm(descricao),
+                    "barras": _norm(barras),
+                    "preco": float(preco) if preco is not None else None,
+                }
+            )
+        return out
+
+    def fetch_stock_price_by_codes(
+        self, codes: List[str]
+    ) -> Dict[str, Dict[str, Optional[float]]]:
+        """Busca estoque e preço para uma lista de códigos."""
+        if not codes:
+            return {}
+        sig = self._discover_product_table()
+        if not sig:
+            return {}
+        table, mapping = sig
+        cols = self._table_columns(table)
+        estoque_col = self._find_first_existing(cols, self._candidate_stock_cols)
+        preco_col = mapping.get("preco")
+        codigo_col = mapping["codigo"]
+        select_parts = [f"{codigo_col} AS CODIGO"]
+        if estoque_col:
+            select_parts.append(f"{estoque_col} AS ESTOQUE")
+        else:
+            select_parts.append("CAST(NULL AS DECIMAL(18,4)) AS ESTOQUE")
+        if preco_col:
+            select_parts.append(f"{preco_col} AS PRECO")
+        else:
+            select_parts.append("CAST(NULL AS DECIMAL(18,4)) AS PRECO")
+        select_cols = ", ".join(select_parts)
+        placeholders = ",".join(["?"] * len(codes))
+        sql = (
+            f"SELECT {select_cols} FROM {table} WHERE {codigo_col} IN ({placeholders})"
+        )
+        with self._connect() as con:
+            cur = con.cursor()
+            cur.execute(sql, codes)
+            rows = cur.fetchall()
+        out: Dict[str, Dict[str, Optional[float]]] = {}
+        for r in rows:
+            codigo, estoque, preco = r
+            out[_norm(codigo) or ""] = {
+                "estoque": float(estoque) if estoque is not None else None,
                 "preco": float(preco) if preco is not None else None,
-            })
+            }
         return out
 
     def search_products_loose(
@@ -263,13 +341,16 @@ class FirebirdClient:
             cur.execute(sql, params)
             rows = cur.fetchall()
 
-        out: List[Dict]] = []
+        # prepare result list with normalized fields
+        out: List[Dict] = []
         for r in rows:
             codigo, descricao, barras, preco = r
-            out.append({
-                "codigo": _norm(codigo),
-                "descricao": _norm(descricao),
-                "barras": _norm(barras),
-                "preco": float(preco) if preco is not None else None,
-            })
+            out.append(
+                {
+                    "codigo": _norm(codigo),
+                    "descricao": _norm(descricao),
+                    "barras": _norm(barras),
+                    "preco": float(preco) if preco is not None else None,
+                }
+            )
         return out

@@ -3,12 +3,14 @@ import os
 import threading
 import time
 import webbrowser
+from typing import Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader, select_autoescape
+from pydantic import BaseModel, Field, validator
 
 from firebird_client import FirebirdClient
 from search_service import SearchService
@@ -43,6 +45,22 @@ sync_service = SyncService(config, fb, repo)
 search_service = SearchService(repo, fb)
 
 
+class SearchParams(BaseModel):
+    produto: str = Field("", max_length=100)
+    veiculo: str = Field("", max_length=100)
+    detalhe: str = Field("", max_length=100)
+
+    @validator("produto", "veiculo", "detalhe", pre=True)
+    def _strip(cls, v: Optional[str]):
+        return v.strip() if isinstance(v, str) else ""
+
+
+async def form_search_params(
+    produto: str = Form(""), veiculo: str = Form(""), detalhe: str = Form("")
+) -> SearchParams:
+    return SearchParams(produto=produto, veiculo=veiculo, detalhe=detalhe)
+
+
 def _open_browser():
     time.sleep(1.5)
     try:
@@ -53,43 +71,65 @@ def _open_browser():
 
 @app.on_event("startup")
 async def startup():
-    sync_service.auto_sync()
+    await sync_service.auto_sync()
     threading.Thread(target=_open_browser, daemon=True).start()
 
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    sync_service.auto_sync()
+    await sync_service.auto_sync()
     template = env.get_template("index.html")
     return template.render()
 
 
 @app.post("/search", response_class=HTMLResponse)
-async def search(
-    request: Request,
-    produto: str = Form(""),
-    veiculo: str = Form(""),
-    detalhe: str = Form(""),
-):
-    sync_service.auto_sync()
+async def search(request: Request, params: SearchParams = Depends(form_search_params)):
+    await sync_service.auto_sync()
     try:
         results = search_service.search(
-            produto=produto, veiculo=veiculo, detalhe=detalhe
+            produto=params.produto, veiculo=params.veiculo, detalhe=params.detalhe
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     template = env.get_template("results.html")
     return template.render(
-        produto=produto, veiculo=veiculo, detalhe=detalhe, results=results
+        produto=params.produto,
+        veiculo=params.veiculo,
+        detalhe=params.detalhe,
+        results=results,
     )
 
 
 @app.get("/api/search")
-async def api_search(produto: str = "", veiculo: str = "", detalhe: str = ""):
-    sync_service.auto_sync()
+async def api_search(params: SearchParams = Depends()):
+    await sync_service.auto_sync()
     return JSONResponse(
-        search_service.search(produto=produto, veiculo=veiculo, detalhe=detalhe)
+        search_service.search(
+            produto=params.produto, veiculo=params.veiculo, detalhe=params.detalhe
+        )
     )
+
+
+@app.get("/api/suggest/produto")
+async def suggest_produto(q: str = ""):
+    await sync_service.auto_sync()
+    items = repo.search_products_cache(q, limit=20)
+    return JSONResponse(items)
+
+
+@app.get("/api/suggest/veiculo")
+async def suggest_veiculo(q: str = ""):
+    await sync_service.auto_sync()
+    items = repo.suggest_vehicles(q)
+    return JSONResponse(items)
+
+
+@app.get("/health")
+async def health():
+    """Retorna estado do Firebird e timestamp da última sincronização."""
+    firebird_ok = fb.ping()
+    last_sync = repo.get_meta("last_sync")
+    return {"firebird": firebird_ok, "last_sync": last_sync}
 
 
 @app.get("/admin/aplicacoes", response_class=HTMLResponse)
