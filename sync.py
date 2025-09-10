@@ -14,6 +14,8 @@ class SyncService:
         self.fb = fb
         self.repo = repo
         self.autosync_minutes = int(config["app"].get("autosync_minutes", 0))
+        # quantidade de itens para snapshot inicial do cache
+        self.snapshot_limit = int(config["app"].get("snapshot_limit", 5000))
         self._task: asyncio.Task | None = None
 
     async def auto_sync(self):
@@ -38,7 +40,7 @@ class SyncService:
         self._task = asyncio.create_task(self.sync_products_cache_async())
 
     def sync_products_cache(self):
-        items = self.fb.fetch_products_basic()
+        items = self.fb.fetch_products_basic(limit=self.snapshot_limit)
         self.repo.upsert_products(items)
         self.repo.set_meta("last_sync", datetime.now().isoformat())
 

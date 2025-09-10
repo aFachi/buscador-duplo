@@ -1,9 +1,7 @@
-# Buscador Duplo
+# Buscador Duplo (Somente Desktop)
 
-Sistema de busca para autopeças baseado em [FastAPI](https://fastapi.tiangolo.com/).
-Permite pesquisar produtos e aplicações de veículos em dois campos que se
-complementam. O projeto mantém um cache local em SQLite e consulta um banco
-Firebird para preço e estoque.
+Aplicativo desktop para busca de autopeças. Removeu-se a parte web para uso local
+no Windows, com UI moderna via `ttk` e resultados em tabela.
 
 ## Instalação
 
@@ -27,15 +25,6 @@ PASSWORD=masterkey
 ## Executando
 
 ```bash
-uvicorn app:app --reload
-```
-A aplicação abre automaticamente o navegador em `http://127.0.0.1:8000`.
-
-### Modo desktop
-
-Para uso direto na máquina do cliente, há uma interface simples em Tkinter:
-
-```bash
 python desktop.py
 ```
 
@@ -43,15 +32,18 @@ Para gerar um executável (Windows), instale o [PyInstaller](https://pyinstaller
 e execute:
 
 ```bash
-pyinstaller --add-data "templates:templates" --add-data "static:static" --noconsole desktop.py
+pyinstaller --noconfirm --onefile --windowed --name BuscadorDuplo desktop.py
 ```
-O executável ficará disponível em `dist/desktop/`.
+O executável ficará em `dist/BuscadorDuplo.exe`.
 
-### Health-check
+### Inspecionar a base
 
-Há um endpoint de verificação rápida em `GET /health` que retorna o estado da
-conexão com o Firebird (`firebird`) e a data/hora da última sincronização
-(`last_sync`).
+Use o utilitário de inspeção para descobrir tabela/colunas e validar o caminho
+do FDB:
+
+```bash
+python inspect_firebird.py
+```
 
 ## Testes
 
@@ -72,16 +64,35 @@ pytest test_firebird_integration.py
 
 ```
 
-## Variáveis de ambiente
+## Configuração via `.env`
 
-As seguintes variáveis podem ser usadas no `.env` ou ambiente do sistema:
+Mínimo:
 
-- `FIREBIRD_HOST`
-- `FIREBIRD_PORT`
-- `FIREBIRD_USER`
-- `FIREBIRD_PASSWORD`
-- `FIREBIRD_DATABASE`
-- `FIREBIRD_CHARSET`
+```
+FIREBIRD_HOST=localhost
+FIREBIRD_PORT=3050
+FIREBIRD_USER=sysdba
+FIREBIRD_PASSWORD=masterkey
+FIREBIRD_DATABASE=BASESGMASTER1.FDB
+```
 
-O parâmetro `app.autosync_minutes` no `config.ini` define o intervalo, em
-minutos, para sincronização automática do cache.
+Mapeamento opcional de colunas (caso a auto-descoberta não acerte a tabela):
+
+```
+FIREBIRD_TABLE=ESTOQUE_ITENS
+FIREBIRD_COL_CODIGO=CODIGO
+FIREBIRD_COL_DESCRICAO=PRODUTO
+FIREBIRD_COL_ESTOQUE=QTDE
+FIREBIRD_COL_PRECO=PRECOVENDA
+FIREBIRD_COL_FORNECEDOR=FORNECEDOR
+FIREBIRD_COL_MARCA=MARCA
+FIREBIRD_COL_GRUPO=GRUPO
+FIREBIRD_COL_SUBGRUPO=SUBGRUPO
+```
+
+Ou defina um SELECT completo com JOINs (deve conter `{placeholders}` e aliases
+exatos `CODIGO, DESCRICAO, BARRAS, PRECO, ESTOQUE, FORNECEDOR, MARCA, GRUPO, SUBGRUPO`):
+
+```
+FIREBIRD_FULL_SQL=SELECT ... WHERE P.CODIGO IN ({placeholders})
+```

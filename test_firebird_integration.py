@@ -1,10 +1,11 @@
 import configparser
+
 import pytest
 
 from firebird_client import FirebirdClient
+from search_service import SearchService
 from sqlite_repo import SqliteRepo
 from sync import SyncService
-from search_service import SearchService
 
 try:
     import firebirdsql
@@ -18,18 +19,24 @@ def test_firebird_sync_and_search(tmp_path):
         pytest.skip("firebirdsql driver not available")
     db_file = tmp_path / "example.fdb"
     try:
-        con = firebirdsql.create_database(dsn=f"localhost:{db_file}", user="sysdba", password="masterkey")
+        con = firebirdsql.create_database(
+            dsn=f"localhost:{db_file}", user="sysdba", password="masterkey"
+        )
     except Exception:
         pytest.skip("Firebird server not available")
     cur = con.cursor()
-    cur.execute("""
+    cur.execute(
+        """
         CREATE TABLE PRODUTOS (
             CODIGO VARCHAR(20) PRIMARY KEY,
             DESCRICAO VARCHAR(100),
             PRECO DECIMAL(10,2)
         )
-    """)
-    cur.execute("INSERT INTO PRODUTOS (CODIGO, DESCRICAO, PRECO) VALUES ('BAT1','Bateria 60Ah',100.0)")
+    """
+    )
+    cur.execute(
+        "INSERT INTO PRODUTOS (CODIGO, DESCRICAO, PRECO) VALUES ('BAT1','Bateria 60Ah',100.0)"
+    )
     con.commit()
     con.close()
 

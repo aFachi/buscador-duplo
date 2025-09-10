@@ -1,16 +1,40 @@
 import configparser
 import os
-from tkinter import END, Button, Entry, Label, Listbox, StringVar, Tk
-from tkinter import END, Listbox, Tk, Entry, Label, Button, StringVar
+from tkinter import Tk
+from tkinter import StringVar
+from tkinter import ttk
 
 from firebird_client import FirebirdClient
 from search_service import SearchService
 from sqlite_repo import SqliteRepo
 from sync import SyncService
 
+try:
+    from dotenv import load_dotenv
+except Exception:
+    # fallback mínimo caso python-dotenv não esteja instalado
+    def load_dotenv(path=None):
+        import os
+
+        p = path or ".env"
+        if not os.path.exists(p):
+            return
+        for line in open(p, "r", encoding="utf-8", errors="ignore"):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "catalogo.db")
 CONFIG_PATH = os.path.join(BASE_DIR, "config.ini")
+
+# Carrega variáveis do .env (inclui FIREBIRD_DATABASE)
+load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 config = configparser.ConfigParser()
 if not os.path.exists(CONFIG_PATH):
@@ -23,100 +47,126 @@ fb = FirebirdClient(config)
 sync_service = SyncService(config, fb, repo)
 search_service = SearchService(repo, fb)
 
-# carga inicial
-sync_service.sync_products_cache()
-
 root = Tk()
 root.title("Buscador Duplo")
+try:
+    root.call("tk", "scaling", 1.25)
+except Exception:
+    pass
+style = ttk.Style()
+for theme in ("vista", "xpnative", "clam"):
+    try:
+        style.theme_use(theme)
+        break
+    except Exception:
+        continue
+
+container = ttk.Frame(root, padding=8)
+container.grid(row=0, column=0, sticky="nsew")
+root.rowconfigure(0, weight=1)
+root.columnconfigure(0, weight=1)
+container.columnconfigure(0, weight=1)
 
 produto_var = StringVar()
 veiculo_var = StringVar()
 detalhe_var = StringVar()
 
-Label(root, text="Produto").grid(row=0, column=0, sticky="w")
-produto_entry = Entry(root, textvariable=produto_var, width=50)
-produto_entry.grid(row=1, column=0, padx=5, pady=5)
-produto_lb = Listbox(root, height=5, width=50)
-produto_lb.grid(row=2, column=0, padx=5, sticky="we")
-produto_lb.grid_remove()
+row = 0
+ttk.Label(container, text="Produto").grid(row=row, column=0, sticky="w")
+row += 1
+produto_entry = ttk.Entry(container, textvariable=produto_var)
+produto_entry.grid(row=row, column=0, sticky="ew", padx=2, pady=2)
+row += 1
 
-Label(root, text="Veículo").grid(row=3, column=0, sticky="w")
-veiculo_entry = Entry(root, textvariable=veiculo_var, width=50)
-veiculo_entry.grid(row=4, column=0, padx=5, pady=5)
-veiculo_lb = Listbox(root, height=5, width=50)
-veiculo_lb.grid(row=5, column=0, padx=5, sticky="we")
-veiculo_lb.grid_remove()
+ttk.Label(container, text="Veículo").grid(row=row, column=0, sticky="w")
+row += 1
+veiculo_entry = ttk.Entry(container, textvariable=veiculo_var)
+veiculo_entry.grid(row=row, column=0, sticky="ew", padx=2, pady=2)
+row += 1
 
-Label(root, text="Detalhe").grid(row=6, column=0, sticky="w")
-detalhe_entry = Entry(root, textvariable=detalhe_var, width=50)
-detalhe_entry.grid(row=7, column=0, padx=5, pady=5)
+ttk.Label(container, text="Detalhe").grid(row=row, column=0, sticky="w")
+row += 1
+detalhe_entry = ttk.Entry(container, textvariable=detalhe_var)
+detalhe_entry.grid(row=row, column=0, sticky="ew", padx=2, pady=2)
+row += 1
 
-results_lb = Listbox(root, width=80, height=15)
-results_lb.grid(row=9, column=0, padx=5, pady=10)
+search_btn = ttk.Button(container, text="Buscar")
+search_btn.grid(row=row, column=0, pady=6, sticky="e")
+row += 1
+
+cols = (
+    "codigo",
+    "descricao",
+    "preco",
+    "estoque",
+    "fornecedor",
+    "marca",
+    "grupo",
+    "subgrupo",
+)
+tree = ttk.Treeview(
+    container,
+    columns=cols,
+    show="headings",
+    height=18,
+)
+headings = {
+    "codigo": "Código",
+    "descricao": "Descrição",
+    "preco": "Preço",
+    "estoque": "Estoque",
+    "fornecedor": "Fornecedor",
+    "marca": "Marca",
+    "grupo": "Grupo",
+    "subgrupo": "Subgrupo",
+}
+for c in cols:
+    tree.heading(c, text=headings[c])
+    anchor = "center" if c in ("preco", "estoque") else "w"
+    width = 90 if c in ("preco", "estoque") else (160 if c == "descricao" else 110)
+    tree.column(c, anchor=anchor, width=width, stretch=True)
+tree.grid(row=row, column=0, sticky="nsew")
+container.rowconfigure(row, weight=1)
+
+vsb = ttk.Scrollbar(container, orient="vertical", command=tree.yview)
+tree.configure(yscrollcommand=vsb.set)
+vsb.grid(row=row, column=1, sticky="ns")
 
 
-def update_produto_suggestions(*args):
-    q = produto_var.get().strip()
-    if len(q) < 2:
-        produto_lb.grid_remove()
+def populate(items):
+    tree.delete(*tree.get_children())
+    if not items:
         return
-    items = repo.search_products_cache(q, limit=10)
-    produto_lb.delete(0, END)
-    for item in items:
-        produto_lb.insert(END, f"{item['codigo']} - {item['descricao']}")
-    if items:
-        produto_lb.grid()
-    else:
-        produto_lb.grid_remove()
+    for r in items:
+        tree.insert(
+            "",
+            "end",
+            values=(
+                r.get("codigo", ""),
+                r.get("descricao", ""),
+                r.get("preco", ""),
+                r.get("estoque", ""),
+                r.get("fornecedor", ""),
+                r.get("marca", ""),
+                r.get("grupo", ""),
+                r.get("subgrupo", ""),
+            ),
+        )
 
 
-def choose_produto(event):
-    if not produto_lb.curselection():
-        return
-    produto_var.set(produto_lb.get(produto_lb.curselection()))
-    produto_lb.grid_remove()
-
-
-produto_entry.bind("<KeyRelease>", lambda e: update_produto_suggestions())
-produto_lb.bind("<<ListboxSelect>>", choose_produto)
-
-
-def update_veiculo_suggestions(*args):
-    q = veiculo_var.get().strip()
-    if len(q) < 2:
-        veiculo_lb.grid_remove()
-        return
-    items = repo.suggest_vehicles(q)
-    veiculo_lb.delete(0, END)
-    for item in items:
-        label = f"{item['marca']} {item['modelo']} {item['ano_inicio']}{'/' + str(item['ano_fim']) if item['ano_fim'] else ''} {item['motor']}".strip()
-        veiculo_lb.insert(END, label)
-    if items:
-        veiculo_lb.grid()
-    else:
-        veiculo_lb.grid_remove()
-
-
-def choose_veiculo(event):
-    if not veiculo_lb.curselection():
-        return
-    veiculo_var.set(veiculo_lb.get(veiculo_lb.curselection()))
-    veiculo_lb.grid_remove()
-
-
-veiculo_entry.bind("<KeyRelease>", lambda e: update_veiculo_suggestions())
-veiculo_lb.bind("<<ListboxSelect>>", choose_veiculo)
-
-
-def do_search():
-    results_lb.delete(0, END)
+def do_search(*_):
     res = search_service.search(produto_var.get(), veiculo_var.get(), detalhe_var.get())
-    for r in res:
-        price = r.get("preco", "")
-        stock = r.get("estoque", "")
-        results_lb.insert(END, f"{r['codigo']} - {r['descricao']} {price} {stock}")
+    items = res.get("items", []) if isinstance(res, dict) else (res or [])
+    populate(items)
 
 
-Button(root, text="Buscar", command=do_search).grid(row=8, column=0, pady=5)
+search_btn.configure(command=do_search)
+produto_entry.bind("<KeyRelease>", do_search)
+veiculo_entry.bind("<KeyRelease>", do_search)
+detalhe_entry.bind("<KeyRelease>", do_search)
+
+# carga inicial de cache e primeiro refresh (não bloqueia UI)
+sync_service.sync_products_cache()
+do_search()
 
 root.mainloop()

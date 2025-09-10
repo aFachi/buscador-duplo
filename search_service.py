@@ -10,44 +10,74 @@ class SearchService:
         self.fb = fb
 
     def search(self, produto: str, veiculo: str, detalhe: str = "") -> Dict[str, Any]:
-        codigos_apl: Set[str] = set()
-        codigos_prod: Set[str] = set()
+        """Busca independente por cada campo e cruza apenas se ambos estiverem preenchidos.
 
-        if veiculo.strip() or detalhe.strip():
-            veic_q = (veiculo + " " + detalhe).strip()
-            apl = self.repo.search_applications(veic_q)
-            codigos_apl = {a["codigo_produto"] for a in apl}
+        Estratégia:
+        - Primeiro tenta o cache (SQLite) para rapidez.
+        - Se nada for encontrado para um termo, faz fallback para o Firebird (pesquisa solta).
+        - Se os dois campos tiverem conteúdo, intersecta os códigos; caso contrário usa o conjunto do campo preenchido.
+        """
 
-        if produto.strip():
-            pc = self.repo.search_products_cache(produto.strip())
-            codigos_prod = {p["codigo"] for p in pc}
+        def codes_for_term(term: str) -> Set[str]:
+            term = term.strip()
+            if not term:
+                return set()
+            # tenta cache
+            cached = self.repo.search_products_cache(term, limit=500)
+            codes = {p["codigo"] for p in cached}
+            if codes:
+                return codes
+            # fallback: busca direta no Firebird
+            fb_items = self.fb.search_products_loose(produto=term, limit=200)
+            # alimente o cache com o que achou para acelerar próximas buscas
+            if fb_items:
+                try:
+                    self.repo.upsert_products(
+                        [
+                            {"codigo": i["codigo"], "descricao": i["descricao"]}
+                            for i in fb_items
+                        ]
+                    )
+                except Exception:
+                    pass
+            return {i["codigo"] for i in fb_items}
 
-        if codigos_apl and codigos_prod:
-            final_codes = list(codigos_apl.intersection(codigos_prod))
-        elif codigos_apl:
-            final_codes = list(codigos_apl)
+        # conjuntos independentes para cada campo
+        codigos_prod = codes_for_term(produto)
+        codigos_apl = codes_for_term((veiculo + " " + detalhe).strip())
+
+        if codigos_prod and codigos_apl:
+            final_codes = list(codigos_prod.intersection(codigos_apl))
         elif codigos_prod:
             final_codes = list(codigos_prod)
+        elif codigos_apl:
+            final_codes = list(codigos_apl)
         else:
             return {"items": [], "count": 0}
 
+        # enriquecer com descrições do cache (ou vazio se não houver)
         produtos_info = {
             p["codigo"]: p for p in self.repo.get_products_by_codes(final_codes)
         }
-        estoque_preco = self.fb.fetch_stock_price_by_codes(final_codes)
+        # Buscar dados completos diretamente do Firebird (inclui extras quando disponíveis)
+        full = self.fb.fetch_full_by_codes(final_codes)
 
         items: List[Dict[str, Any]] = []
         for code in final_codes:
             desc = produtos_info.get(code, {}).get(
                 "descricao", "(sem descrição no cache)"
             )
-            sp = estoque_preco.get(code, {"estoque": None, "preco": None})
+            sp = full.get(code, {})
             items.append(
                 {
                     "codigo": code,
-                    "descricao": desc,
+                    "descricao": sp.get("descricao", desc),
                     "estoque": sp.get("estoque"),
                     "preco": sp.get("preco"),
+                    "fornecedor": sp.get("fornecedor"),
+                    "marca": sp.get("marca"),
+                    "grupo": sp.get("grupo"),
+                    "subgrupo": sp.get("subgrupo"),
                 }
             )
         items.sort(key=lambda x: (x["descricao"] or "").lower())
