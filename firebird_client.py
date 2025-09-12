@@ -3,6 +3,7 @@ import contextlib
 import os
 import re
 from typing import Dict, List, Optional, Tuple
+import configparser
 
 try:
     import firebirdsql  # driver puro Python compatível com FB 2.5
@@ -34,10 +35,23 @@ class FirebirdClient:
         "ESTOQUE",
         "TESTOQUE",
         "T_ESTOQUE",
-        "ITENS",
-        "TITENS",
-        "ITEM",
-        "TITEM",
+    ]
+
+    # Tabelas a evitar (itens de venda/comanda/pedido/movimentação etc.)
+    _exclude_table_patterns = [
+        r"COMANDA",
+        r"PEDID",
+        r"ORCAMENT",
+        r"CUPOM",
+        r"VENDA",
+        r"NF",
+        r"NOTA",
+        r"MOV",
+        r"MOVIMENT",
+        r"GRADE",  # evita tabelas de grade como catálogo principal
+        r"_ITENS?\b",
+        r"\bITENS?\b",
+        r"\bITEM\b",
     ]
 
     # mapeamento de aliases possíveis -> chave padronizada
@@ -66,14 +80,36 @@ class FirebirdClient:
         "QTESTOQUE",
     ]
 
-    def __init__(self, cfg):
+    def __init__(self, cfg: configparser.ConfigParser):
+        # Aceita [FIREBIRD] ou [firebird]
+        fb_section: Optional[str] = None
+        for s in ("FIREBIRD", "firebird"):
+            if cfg.has_section(s):
+                fb_section = s
+                break
+
+        def opt(name: str, default: Optional[str] = None) -> Optional[str]:
+            if fb_section and cfg.has_option(fb_section, name):
+                # ConfigParser é case-insensitive para opções
+                return cfg.get(fb_section, name)
+            return default
+
+        def opt_int(name: str, default: Optional[int] = None) -> Optional[int]:
+            if fb_section and cfg.has_option(fb_section, name):
+                try:
+                    return cfg.getint(fb_section, name)
+                except Exception:
+                    pass
+            return default
+
         # 1) tenta pegar do config.ini (se houver)
-        host = cfg.get("FIREBIRD", "HOST", fallback=None)
-        port = cfg.getint("FIREBIRD", "PORT", fallback=None)
-        user = cfg.get("FIREBIRD", "USER", fallback=None)
-        password = cfg.get("FIREBIRD", "PASSWORD", fallback=None)
-        database = cfg.get("FIREBIRD", "DATABASE", fallback=None)
-        charset = cfg.get("FIREBIRD", "CHARSET", fallback=None)
+        host = opt("HOST")
+        port = opt_int("PORT")
+        user = opt("USER")
+        password = opt("PASSWORD")
+        # aceitar DATABASE ou DATABASE_PATH
+        database = opt("DATABASE") or opt("DATABASE_PATH")
+        charset = opt("CHARSET")
 
         # 2) senão, cai pro .env
         self.host = host or os.environ.get("FIREBIRD_HOST", "localhost")
@@ -104,36 +140,25 @@ class FirebirdClient:
             )
 
         # overrides opcionais de mapeamento/tabela
-        self._override_table = cfg.get(
-            "FIREBIRD", "TABLE", fallback=None
-        ) or os.environ.get("FIREBIRD_TABLE")
+        self._override_table = opt("TABLE") or os.environ.get("FIREBIRD_TABLE")
         self._override_cols: Dict[str, Optional[str]] = {
-            "codigo": cfg.get("FIREBIRD", "COL_CODIGO", fallback=None)
-            or os.environ.get("FIREBIRD_COL_CODIGO"),
-            "descricao": cfg.get("FIREBIRD", "COL_DESCRICAO", fallback=None)
+            "codigo": opt("COL_CODIGO") or os.environ.get("FIREBIRD_COL_CODIGO"),
+            "descricao": opt("COL_DESCRICAO")
             or os.environ.get("FIREBIRD_COL_DESCRICAO"),
-            "barras": cfg.get("FIREBIRD", "COL_BARRAS", fallback=None)
-            or os.environ.get("FIREBIRD_COL_BARRAS"),
-            "preco": cfg.get("FIREBIRD", "COL_PRECO", fallback=None)
-            or os.environ.get("FIREBIRD_COL_PRECO"),
+            "barras": opt("COL_BARRAS") or os.environ.get("FIREBIRD_COL_BARRAS"),
+            "preco": opt("COL_PRECO") or os.environ.get("FIREBIRD_COL_PRECO"),
             # extras
-            "estoque": cfg.get("FIREBIRD", "COL_ESTOQUE", fallback=None)
-            or os.environ.get("FIREBIRD_COL_ESTOQUE"),
-            "fornecedor": cfg.get("FIREBIRD", "COL_FORNECEDOR", fallback=None)
+            "estoque": opt("COL_ESTOQUE") or os.environ.get("FIREBIRD_COL_ESTOQUE"),
+            "fornecedor": opt("COL_FORNECEDOR")
             or os.environ.get("FIREBIRD_COL_FORNECEDOR"),
-            "marca": cfg.get("FIREBIRD", "COL_MARCA", fallback=None)
-            or os.environ.get("FIREBIRD_COL_MARCA"),
-            "grupo": cfg.get("FIREBIRD", "COL_GRUPO", fallback=None)
-            or os.environ.get("FIREBIRD_COL_GRUPO"),
-            "subgrupo": cfg.get("FIREBIRD", "COL_SUBGRUPO", fallback=None)
-            or os.environ.get("FIREBIRD_COL_SUBGRUPO"),
+            "marca": opt("COL_MARCA") or os.environ.get("FIREBIRD_COL_MARCA"),
+            "grupo": opt("COL_GRUPO") or os.environ.get("FIREBIRD_COL_GRUPO"),
+            "subgrupo": opt("COL_SUBGRUPO") or os.environ.get("FIREBIRD_COL_SUBGRUPO"),
         }
         # SQL completo opcional (para permitir JOINs). Deve selecionar colunas
         # com aliases: CODIGO, DESCRICAO, BARRAS, PRECO, ESTOQUE, FORNECEDOR, MARCA, GRUPO, SUBGRUPO
         # e conter o token {placeholders} em um IN (...) que iremos preencher.
-        self._override_full_sql = cfg.get(
-            "FIREBIRD", "FULL_SQL", fallback=None
-        ) or os.environ.get("FIREBIRD_FULL_SQL")
+        self._override_full_sql = opt("FULL_SQL") or os.environ.get("FIREBIRD_FULL_SQL")
 
         # cache de metadados
         self._columns_cache: Dict[str, List[str]] = {}
@@ -201,14 +226,62 @@ class FirebirdClient:
     def _looks_like_product_table(self, table: str, cols: List[str]) -> bool:
         up = table.upper()
         # heurística: nome forte + existência de ao menos 1 campo "descricao"
+        # primeiro filtra padrões que certamente não são catálogo (itens de pedido/comanda, etc.)
+        for pat in self._exclude_table_patterns:
+            if re.search(pat, up):
+                return False
         if any(up == c for c in self._likely_product_tables):
             return True
         # nomes que "sugiram" produto/estoque
-        if re.search(r"(PROD|ESTOQ|ITEM)", up):
+        if re.search(r"(PROD|ESTOQ)", up):
             # precisa ter pelo menos uma coluna que pareça descrição
             if self._find_first_existing(cols, self._candidate_cols["descricao"]):
                 return True
         return False
+
+    def _has_rows(self, table: str, mapping: Dict[str, str]) -> bool:
+        try:
+            with self._connect() as con:
+                cur = con.cursor()
+                cur.execute(f"SELECT FIRST 1 {mapping.get('codigo','1')} FROM {table}")
+                return cur.fetchone() is not None
+        except Exception:
+            return False
+
+    def _discover_product_candidates(
+        self, max_candidates: int = 10, *, lenient: bool = False
+    ) -> List[Tuple[str, Dict[str, str]]]:
+        """Lista candidatos de tabela de produto com mapeamento válido e amostra>0.
+
+        Quando lenient=True, ignora o filtro de nome/tipo (não usa _looks_like_product_table)
+        e considera qualquer tabela que tenha combinações plausíveis de código+descrição.
+        """
+        tables = self._list_tables()
+        candidates: List[Tuple[str, Dict[str, str], int]] = []  # (t, mapping, score)
+        for t in tables:
+            cols = self._table_columns(t)
+            if not lenient:
+                if not self._looks_like_product_table(t, cols):
+                    continue
+            m: Dict[str, str] = {}
+            score = 0
+            for key in ["codigo", "descricao", "barras", "preco"]:
+                hit = self._find_first_existing(cols, self._candidate_cols[key])
+                if hit:
+                    m[key] = hit
+                    if key in ("codigo", "descricao"):
+                        score += 10
+                    elif key == "preco":
+                        score += 2
+                    elif key == "barras":
+                        score += 1
+            if "codigo" in m and "descricao" in m and self._has_rows(t, m):
+                # bônus por nome forte
+                if t.upper() in self._likely_product_tables:
+                    score += 2
+                candidates.append((t, m, score))
+        candidates.sort(key=lambda x: x[2], reverse=True)
+        return [(t, m) for (t, m, _s) in candidates[:max_candidates]]
 
     def _discover_product_table(self) -> Optional[Tuple[str, Dict[str, str]]]:
         """
@@ -226,47 +299,38 @@ class FirebirdClient:
         ):
             table = self._override_table
             m = {k: v for k, v in self._override_cols.items() if v}
-            self._product_table_signature = (table, m)  # inclui extras no mapeamento
-            _log(f"Tabela de produto (override): {table} -> {m}")
-            return self._product_table_signature
+            # valida se a tabela e as colunas existem
+            try:
+                tables = self._list_tables()
+                if table.upper() in {t.upper() for t in tables}:
+                    cols = self._table_columns(table)
+                    missing = [
+                        c
+                        for c in (m.get("codigo"), m.get("descricao"))
+                        if c and c.upper() not in {x.upper() for x in cols}
+                    ]
+                    if not missing:
+                        # também exige ao menos 1 linha
+                        if self._has_rows(table, m):
+                            self._product_table_signature = (table, m)  # inclui extras
+                            _log(f"Tabela de produto (override): {table} -> {m}")
+                            return self._product_table_signature
+                        else:
+                            _log(f"Override ignorado: {table} não tem linhas.")
+                    else:
+                        _log(
+                            f"Override inválido: colunas ausentes em {table}: {missing}. Ignorando override."
+                        )
+                else:
+                    _log(
+                        f"Override inválido: tabela {table} não existe. Ignorando override."
+                    )
+            except Exception as e:
+                _log(f"Falha ao validar override {table}: {e}. Ignorando override.")
 
-        tables = self._list_tables()
-        # tente as "fortes" primeiro
-        ordered = sorted(
-            tables,
-            key=lambda t: (0 if t.upper() in self._likely_product_tables else 1, t),
-        )
-        best: Optional[Tuple[str, Dict[str, str], int]] = None
-        for t in ordered:
-            cols = self._table_columns(t)
-            if not self._looks_like_product_table(t, cols):
-                continue
-            m: Dict[str, str] = {}
-            score = 0
-            # mapeia basicos
-            for key in ["codigo", "descricao", "barras", "preco"]:
-                hit = self._find_first_existing(cols, self._candidate_cols[key])
-                if hit:
-                    m[key] = hit
-                    if key in ("codigo", "descricao"):
-                        score += 10
-                    elif key == "preco":
-                        score += 2
-                    elif key == "barras":
-                        score += 1
-            # estoque contribui bastante
-            estoque_col = self._find_first_existing(cols, self._candidate_stock_cols)
-            if estoque_col:
-                m["estoque"] = estoque_col
-                score += 3
-            # boost por nome forte
-            if t.upper() in self._likely_product_tables:
-                score += 2
-            if "codigo" in m and "descricao" in m:
-                if not best or score > best[2]:
-                    best = (t, m, score)
-        if best:
-            t, m, _ = best
+        cands = self._discover_product_candidates()
+        if cands:
+            t, m = cands[0]
             self._product_table_signature = (t, m)
             _log(f"Tabela de produto descoberta: {t} -> {m}")
             return self._product_table_signature
@@ -492,64 +556,88 @@ class FirebirdClient:
         Pesquisa "solta" no Firebird com base nas colunas que existirem.
         O SearchService usa o SQLite; isto aqui serve de fallback se você quiser.
         """
-        sig = self._discover_product_table()
-        if not sig:
-            return []
-        table, mapping = sig
-
         terms = [t for t in [produto, veiculo, detalhe] if t]
         if not terms:
             return []
 
-        where_clauses = []
-        params: List[str] = []
-        # consulta somente em texto (descricao) + opcionalmente código/barras se parecerem searchables
-        if "descricao" in mapping:
-            for t in terms:
-                where_clauses.append(f"{mapping['descricao']} LIKE ?")
-                params.append(f"%{t}%")
+        # tenta tabela principal, depois candidatos adicionais até preencher o limite
+        tried: List[str] = []
+        results: Dict[str, Dict] = {}
 
-        if "codigo" in mapping:
-            for t in terms:
-                where_clauses.append(f"CAST({mapping['codigo']} AS VARCHAR(50)) LIKE ?")
-                params.append(f"%{t}%")
-
-        if "barras" in mapping:
-            for t in terms:
-                where_clauses.append(f"{mapping['barras']} LIKE ?")
-                params.append(f"%{t}%")
-
-        if not where_clauses:
-            return []
-
-        parts = []
-        parts.append(f"{mapping['codigo']} AS CODIGO")
-        parts.append(f"{mapping['descricao']} AS DESCRICAO")
-        parts.append(f"{mapping.get('barras', 'CAST(NULL AS VARCHAR(40))')} AS BARRAS")
-        parts.append(f"{mapping.get('preco', 'CAST(NULL AS DECIMAL(18,4))')} AS PRECO")
-
-        select_cols = ", ".join(parts)
-        sql = f"""
-            SELECT FIRST {int(limit)} {select_cols}
-            FROM {table}
-            WHERE {" OR ".join(where_clauses)}
-        """
-
-        with self._connect() as con:
-            cur = con.cursor()
-            cur.execute(sql, params)
-            rows = cur.fetchall()
-
-        # prepare result list with normalized fields
-        out: List[Dict] = []
-        for r in rows:
-            codigo, descricao, barras, preco = r
-            out.append(
-                {
-                    "codigo": _norm(codigo),
-                    "descricao": _norm(descricao),
-                    "barras": _norm(barras),
-                    "preco": float(preco) if preco is not None else None,
-                }
+        def run_on(table: str, mapping: Dict[str, str], remaining: int):
+            where_clauses: List[str] = []
+            params: List[str] = []
+            if mapping.get("descricao"):
+                for t in terms:
+                    where_clauses.append(f"{mapping['descricao']} CONTAINING ?")
+                    params.append(t)
+            if mapping.get("codigo"):
+                for t in terms:
+                    where_clauses.append(
+                        f"CAST({mapping['codigo']} AS VARCHAR(50)) LIKE ?"
+                    )
+                    params.append(f"%{t}%")
+            if mapping.get("barras"):
+                for t in terms:
+                    where_clauses.append(f"{mapping['barras']} LIKE ?")
+                    params.append(f"%{t}%")
+            if not where_clauses:
+                return 0
+            parts = [
+                f"{mapping['codigo']} AS CODIGO",
+                f"{mapping['descricao']} AS DESCRICAO",
+                f"{mapping.get('barras', 'CAST(NULL AS VARCHAR(40))')} AS BARRAS",
+                f"{mapping.get('preco', 'CAST(NULL AS DECIMAL(18,4))')} AS PRECO",
+            ]
+            select_cols = ", ".join(parts)
+            sql = (
+                f"SELECT FIRST {int(remaining)} {select_cols} FROM {table} "
+                f"WHERE {' OR '.join(where_clauses)}"
             )
-        return out
+            try:
+                with self._connect() as con:
+                    cur = con.cursor()
+                    cur.execute(sql, params)
+                    for codigo, descricao, barras, preco in cur.fetchall():
+                        code = _norm(codigo) or ""
+                        if not code or code in results:
+                            continue
+                        results[code] = {
+                            "codigo": code,
+                            "descricao": _norm(descricao),
+                            "barras": _norm(barras),
+                            "preco": float(preco) if preco is not None else None,
+                        }
+                        if len(results) >= limit:
+                            break
+            except Exception as e:
+                _log(f"Falha ao buscar em {table}: {e}")
+            return len(results)
+
+        # 1) principal
+        sig = self._discover_product_table()
+        if sig:
+            table, mapping = sig
+            tried.append(table.upper())
+            run_on(table, mapping, limit)
+
+        # 2) candidatos adicionais
+        if len(results) < limit:
+            # primeiro candidatos "fortes"; depois, em modo leniente (qualquer tabela com codigo+descricao)
+            for t, m in self._discover_product_candidates(max_candidates=20):
+                if t.upper() in tried:
+                    continue
+                run_on(t, m, limit - len(results))
+                if len(results) >= limit:
+                    break
+        if len(results) < limit:
+            for t, m in self._discover_product_candidates(
+                max_candidates=30, lenient=True
+            ):
+                if t.upper() in tried:
+                    continue
+                run_on(t, m, limit - len(results))
+                if len(results) >= limit:
+                    break
+
+        return list(results.values())

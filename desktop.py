@@ -1,8 +1,6 @@
 import configparser
 import os
-from tkinter import Tk
-from tkinter import StringVar
-from tkinter import ttk
+from tkinter import StringVar, Tk, ttk
 
 from firebird_client import FirebirdClient
 from search_service import SearchService
@@ -166,7 +164,15 @@ veiculo_entry.bind("<KeyRelease>", do_search)
 detalhe_entry.bind("<KeyRelease>", do_search)
 
 # carga inicial de cache e primeiro refresh (não bloqueia UI)
-sync_service.sync_products_cache()
-do_search()
+try:
+    sync_service.sync_products_cache()
+except Exception as e:
+    print(f"[WARN] Sync inicial falhou: {e}")
+    # segue sem cache inicial; buscas vão tentar fallback
+
+try:
+    do_search()
+except Exception as e:
+    print(f"[WARN] Primeira busca falhou: {e}")
 
 root.mainloop()
